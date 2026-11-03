@@ -1,0 +1,14 @@
+require('dotenv').config();
+const express=require('express'), session=require('express-session'), crypto=require('crypto');
+const app=express(), PORT=process.env.PORT||3000;
+const ID=process.env.DISCORD_CLIENT_ID, SECRET=process.env.DISCORD_CLIENT_SECRET, REDIRECT=process.env.DISCORD_REDIRECT_URI;
+app.set('trust proxy',1);
+app.use(express.json());
+app.use(session({name:'nexivo.sid',secret:process.env.SESSION_SECRET||'replace-this-before-deploying',resave:false,saveUninitialized:false,cookie:{httpOnly:true,secure:process.env.NODE_ENV==='production',sameSite:'lax',maxAge:604800000}}));
+const ready=()=>Boolean(ID&&SECRET&&REDIRECT&&process.env.SESSION_SECRET&&process.env.SESSION_SECRET!=='replace-this-before-deploying');
+app.get('/',(_q,r)=>r.json({name:'Nexivo backend',status:'running'}));
+app.get('/auth/discord',(q,r)=>{if(!ready())return r.status(503).send('Discord OAuth is not configured yet.');const state=crypto.randomBytes(24).toString('hex');q.session.oauthState=state;const p=new URLSearchParams({client_id:ID,redirect_uri:REDIRECT,response_type:'code',scope:'identify guilds',state});r.redirect('https://discord.com/oauth2/authorize?'+p.toString());});
+app.get('/auth/discord/callback',async(q,r)=>{if(!ready())return r.status(503).send('Discord OAuth is not configured yet.');const {code,state,error}=q.query;if(error)return r.status(400).send('Discord login was cancelled.');if(!code||!state||state!==q.session.oauthState)return r.status(400).send('Invalid OAuth state. Please log in again.');delete q.session.oauthState;try{const tr=await fetch('https://discord.com/api/oauth2/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({client_id:ID,client_secret:SECRET,grant_type:'authorization_code',code,redirect_uri:REDIRECT})});const token=await tr.json();if(!tr.ok){console.error(token);return r.status(502).send('Discord login failed.');}const h={Authorization:'Bearer '+token.access_token};const [ur,gr]=await Promise.all([fetch('https://discord.com/api/users/@me',{headers:h}),fetch('https://discord.com/api/users/@me/guilds',{headers:h})]);if(!ur.ok||!gr.ok)return r.status(502).send('Could not load Discord account.');q.session.user=await ur.json();q.session.guilds=await gr.json();r.redirect(process.env.FRONTEND_URL||'http://localhost:3000');}catch(e){console.error(e);r.status(500).send('Login error.');}});
+app.get('/api/me',(q,r)=>{if(!q.session.user)return r.status(401).json({loggedIn:false});const u=q.session.user;r.json({loggedIn:true,user:{id:u.id,username:u.username,global_name:u.global_name,avatar:u.avatar},guilds:(q.session.guilds||[]).map(g=>({id:g.id,name:g.name,icon:g.icon,owner:g.owner,permissions:g.permissions}))});});
+app.post('/auth/logout',(q,r)=>q.session.destroy(()=>{r.clearCookie('nexivo.sid');r.json({ok:true});}));
+app.listen(PORT,()=>console.log('Nexivo backend listening on '+PORT));
